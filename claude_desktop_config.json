@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "onboarding-agent": {
+      "command": "node",
+      "args": ["/Users/henrymarks/Documents/GitHub/OnboardingAI/build/index.js"]
+    },
+    "scheduling-agent": {
+      "command": "node",
+      "args": [
+        "/Users/henrymarks/Documents/GitHub/Durate/Durate-Codebase/Schedule-MCP/build/index.js"
+      ]
+    },
+
+    "excel-sse": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+} 

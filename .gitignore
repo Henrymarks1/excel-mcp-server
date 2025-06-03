@@ -34,3 +34,4 @@ output/
 *.xls
 *.log 
 excel_files/
+./src/excel_mcp/service-account.json

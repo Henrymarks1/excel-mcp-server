@@ -1,6 +1,8 @@
 import logging
 import os
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Union
+import asyncio
+import json
 
 from mcp.server.fastmcp import FastMCP
 
@@ -32,6 +34,10 @@ from excel_mcp.sheet import (
     merge_range,
     unmerge_range,
 )
+# Import the data reformatting function
+from excel_mcp.run_reformatting_script import execute_python_with_json
+from google.cloud import storage
+from google.oauth2 import service_account
 
 # Get project root directory path for log file path.
 # When using the stdio transmission method,
@@ -223,7 +229,7 @@ def read_data_from_excel(
 def write_data_to_excel(
     filepath: str,
     sheet_name: str,
-    data: List[List],
+    input_data: List[List],
     start_cell: str = "A1",
 ) -> str:
     """
@@ -233,13 +239,13 @@ def write_data_to_excel(
     PARAMETERS:  
     filepath: Path to Excel file
     sheet_name: Name of worksheet to write to
-    data: List of lists containing data to write to the worksheet, sublists are assumed to be rows
+    input_data: List of lists containing data to write to the worksheet, sublists are assumed to be rows
     start_cell: Cell to start writing to, default is "A1"
   
     """
     try:
         full_path = get_excel_path(filepath)
-        result = write_data(full_path, sheet_name, data, start_cell)
+        result = write_data(full_path, sheet_name, input_data, start_cell)
         return result["message"]
     except (ValidationError, DataError) as e:
         return f"Error: {str(e)}"
@@ -499,6 +505,144 @@ def validate_excel_range(
     except Exception as e:
         logger.error(f"Error validating range: {e}")
         raise
+
+@mcp.tool()
+async def create_download_link(
+    filepath: str,
+) -> str:
+    try:
+        logger.info("Starting create_download_link function")
+        bucket_name = "downloadable_excel_files"
+        full_path = get_excel_path(filepath)
+        filename = os.path.basename(full_path)
+        logger.info(f"Processing file: {filename}")
+        
+        # Handle Google Cloud credentials - read from service account file
+        credentials_path = './src/excel_mcp/service-account.json'
+        
+        logger.info(f"Credentials path: {credentials_path}")
+        
+        if not os.path.exists(credentials_path):
+            logger.error(f"Service account file not found: {credentials_path}")
+            return f"Error: Service account file not found: {credentials_path}"
+        
+        # Define the upload function that will run in a separate thread
+        def upload_to_gcs():
+            logger.info("Creating credentials...")
+            
+            # Read the service account file to get project ID
+            with open(credentials_path, 'r') as f:
+                service_account_info = json.load(f)
+            
+            project_id = service_account_info.get('project_id')
+            if not project_id:
+                raise ValueError("project_id not found in service account file")
+            
+            logger.info(f"Project ID from service account: {project_id}")
+            
+            # Create credentials from the service account file
+            credentials = service_account.Credentials.from_service_account_file(
+                credentials_path,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            
+            logger.info("Creating storage client...")
+            storage_client = storage.Client(
+                project=project_id,
+                credentials=credentials
+            )
+            
+            logger.info(f"Getting bucket: {bucket_name}")
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(filename)
+            
+            logger.info(f"Uploading file: {full_path}")
+            blob.upload_from_filename(full_path)
+            
+            logger.info("Generating signed URL...")
+            # Generate a signed URL that's valid for 24 hours
+            from datetime import timedelta
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(hours=24),
+                method="GET"
+            )
+            
+            return signed_url
+        
+        # Run the blocking operation in a separate thread
+        logger.info("Running upload in thread...")
+        public_url = await asyncio.to_thread(upload_to_gcs)
+        
+        logger.info(f"Upload successful: {public_url}")
+        return f"Public URL: {public_url}"
+        
+    except Exception as e:
+        logger.error(f"Error uploading file to GCS: {e}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return f"Error uploading file: {str(e)}"
+
+# @mcp.tool()
+# def reformat_data_for_excel(
+#     json_data: Union[str, list, dict],
+#     python_code: str
+# ) -> str:
+#     """
+#     Reformat complex data structures into List[Dict] format for Excel export.
+    
+#     Use this tool when you have complicated JSON data that needs to be transformed 
+#     before passing to write_data_to_excel. The python_code should process the 'data' 
+#     variable (which contains the parsed JSON) and store the result in a 'result' variable.
+    
+#     The output will always be formatted as a List[Dict] suitable for Excel export where
+#     each dictionary represents a row and the keys become column headers.
+    
+#     PARAMETERS:
+#     json_data: JSON string or already-parsed data (list/dict) containing the data to be reformatted
+#     python_code: Python code that processes 'data' variable and stores result in 'result' variable
+    
+#     EXAMPLE:
+#     json_data: '{"sales": [{"product": "Widget", "q1": 100, "q2": 150}, {"product": "Gadget", "q1": 200, "q2": 175}]}'
+#     OR
+#     json_data: {"sales": [{"product": "Widget", "q1": 100, "q2": 150}, {"product": "Gadget", "q1": 200, "q2": 175}]}
+    
+#     python_code: '''
+# result = []
+# for item in data['sales']:
+#     total = item['q1'] + item['q2']
+#     growth = ((item['q2'] - item['q1']) / item['q1']) * 100
+#     result.append({
+#         "Product": item['product'],
+#         "Q1_Sales": item['q1'], 
+#         "Q2_Sales": item['q2'],
+#         "Total": total,
+#         "Growth_Percent": round(growth, 1)
+#     })
+# '''
+    
+#     Returns: JSON string of List[Dict] format ready for write_data_to_excel
+#     """
+#     try:
+#         # Handle both string JSON and already-parsed data
+#         if isinstance(json_data, str):
+#             # It's a JSON string, use as-is
+#             data_to_pass = json_data
+#         else:
+#             # It's already parsed data (list/dict), convert to JSON string
+#             data_to_pass = json.dumps(json_data)
+        
+#         # Execute the Python code with the JSON data
+#         # This returns List[Dict] which is exactly what we need
+#         formatted_result = execute_python_with_json(python_code, data_to_pass)
+        
+#         # Return as JSON string - already in List[Dict] format
+#         return json.dumps(formatted_result)
+        
+#     except Exception as e:
+#         logger.error(f"Error reformatting data for Excel: {e}")
+#         return f"Error: {str(e)}"
 
 async def run_sse():
     """Run Excel MCP server in SSE mode."""
